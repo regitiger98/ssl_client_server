@@ -7,17 +7,36 @@
 #include <sys/socket.h> // for socket
 
 #include <thread>
+
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 using namespace std;
 
-void Recv(int sockfd)
+SSL_CTX* InitCTX(void)
+{
+	SSL_METHOD *method;
+	SSL_CTX *ctx;
+	OpenSSL_add_all_algorithms();  /* Load cryptos, et.al. */
+	SSL_load_error_strings();   /* Bring in and register error messages */
+	method = (SSL_METHOD*)TLSv1_2_client_method();  /* Create new client-method instance */
+	ctx = SSL_CTX_new(method);   /* Create new context */
+	if ( ctx == NULL )
+	{
+		ERR_print_errors_fp(stderr);
+		abort();
+	}
+	return ctx;
+}
+
+void Recv(SSL *ssl)
 {
 	const static int BUFSIZE = 1024;
 	char buf[BUFSIZE];
 
 	while (true) {
-		ssize_t received = recv(sockfd, buf, BUFSIZE - 1, 0);
+		ssize_t received = SSL_read(ssl, buf, BUFSIZE - 1);
 		if (received == 0 || received == -1) {
-			perror("recv failed");
+			perror("SSL_read failed");
 			exit(1);
 		}
 		buf[received] = '\0';
@@ -26,6 +45,16 @@ void Recv(int sockfd)
 }
 
 int main(int argc, char *argv[]) {
+	if ( argc != 3 )
+	{
+		printf("usage: %s <hostname> <portnum>\n", argv[0]);
+		exit(0);
+	}
+	
+
+	SSL_library_init();
+	SSL_CTX *ctx = InitCTX();
+	
 	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd == -1) {
 		perror("socket failed");
@@ -43,26 +72,34 @@ int main(int argc, char *argv[]) {
 		perror("connect failed");
 		return -1;
 	}
-	printf("connected\n");
-	
-	thread Thread(Recv, sockfd);
-	while (true) {
-		const static int BUFSIZE = 1024;
-		char buf[BUFSIZE];
+	printf("connected to %s:%s\n", argv[1], argv[2]);
 
-		scanf("%s", buf);
-		if (strcmp(buf, "quit") == 0) {
-			close(sockfd);
-			exit(1);
-		}
+	SSL *ssl = SSL_new(ctx);
+	SSL_set_fd(ssl, sockfd);
+	if(SSL_connect(ssl) == -1)
+		ERR_print_errors_fp(stderr);
+	else
+	{
+		thread Thread(Recv, ssl);
+		while (true) {
+			const static int BUFSIZE = 1024;
+			char buf[BUFSIZE];
 
-		ssize_t sent = send(sockfd, buf, strlen(buf), 0);
-		if (sent == 0) {
-			perror("send failed");
-			break;
+			scanf("%s", buf);
+			if (strcmp(buf, "quit") == 0) {
+				close(sockfd);
+				exit(1);
+			}
+
+			ssize_t sent = SSL_write(ssl, buf, strlen(buf));
+			if (sent == 0) {
+				perror("SSL_write failed");
+				exit(1);
+			}
 		}
+		Thread.join();
 	}
-	Thread.join();
 
 	close(sockfd);
+	SSL_CTX_free(ctx);
 }
